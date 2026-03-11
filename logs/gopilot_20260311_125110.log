@@ -1,0 +1,9 @@
+[2026-03-11 12:51:10.100] [main.go:25] Logger initialized file=logs/gopilot_20260311_125110.log
+[2026-03-11 12:51:10.113] [main.go:30] GoPilot starting debug=true
+[2026-03-11 12:51:12.129] [main.go:44] Client initialized model=Qwen3-0.6B-Q8_0.gguf
+[2026-03-11 12:51:21.930] [client.go:38] Calling list_directory tool path=
+[2026-03-11 12:51:21.942] [client.go:46] list_directory tool succeeded path=
+[2026-03-11 12:52:24.120] [client.go:87] Calling read_file tool path=
+[2026-03-11 12:52:24.129] [client.go:93] read_file tool failed path= error=invalid argument
+[2026-03-11 13:04:54.949] [main.go:72] GoPilot exited
+[2026-03-11 13:04:54.959] [main.go:73] Logger closed

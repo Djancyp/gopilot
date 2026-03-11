@@ -1,0 +1,7 @@
+[2026-03-11 13:17:40.106] [main.go:25] Logger initialized file=logs/gopilot_20260311_131740.log
+[2026-03-11 13:17:40.115] [main.go:30] GoPilot starting debug=true
+[2026-03-11 13:17:46.506] [main.go:44] Client initialized model=Qwen3-0.6B-Q8_0.gguf
+[2026-03-11 13:18:24.293] [client.go:381] Executing command command=ls
+[2026-03-11 13:18:24.352] [client.go:393] Command succeeded command=ls output_length=5
+[2026-03-11 13:47:46.334] [main.go:72] GoPilot exited
+[2026-03-11 13:47:46.344] [main.go:73] Logger closed

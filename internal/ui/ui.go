@@ -6,10 +6,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/gopilot/gopilot/client"
+	"github.com/gopilot/gopilot/internal/modal"
 )
 
 // SetClientFunc is a function to get the AI client, set by main package
@@ -36,6 +38,13 @@ type Model struct {
 	cursorLine      int
 	cursorPos       int
 	inputScroll     int
+	copyStatus      string
+	copyStatusTimer int
+	lastCommand     string
+	execStatus      string
+	execStatusTimer int
+	execModal       *modal.Model
+	autoExecute     bool
 }
 
 // Status represents the client status
@@ -76,8 +85,13 @@ func NewModel(client *Client) Model {
 
 // Init initializes the model
 func (m Model) Init() tea.Cmd {
-	return textinput.Blink
+	return tea.Batch(textinput.Blink, tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+		return tickMsg{}
+	}))
 }
+
+// tickMsg is a message type for timer ticks
+type tickMsg struct{}
 
 // Update handles messages and updates the model
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -91,7 +105,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.chatHeight < 5 {
 			m.chatHeight = 5
 		}
-		return m, nil
+		return m, tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+			return tickMsg{}
+		})
+
+	case tickMsg:
+		// Decrement copy status timer
+		if m.copyStatusTimer > 0 {
+			m.copyStatusTimer--
+			if m.copyStatusTimer == 0 {
+				m.copyStatus = ""
+			}
+		}
+		return m, tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+			return tickMsg{}
+		})
 
 	case tea.MouseMsg:
 		// Handle mouse wheel for scrolling
@@ -119,36 +147,61 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 
-		case tea.KeyPgUp:
-			m.scrollOffset -= m.chatHeight / 2
-			if m.scrollOffset < 0 {
-				m.scrollOffset = 0
+		case tea.KeyCtrlK:
+			// Copy last message to clipboard
+			if len(m.messages) > 0 {
+				lastMsg := m.messages[len(m.messages)-1]
+				if err := clipboard.WriteAll(lastMsg.Content); err == nil {
+					m.copyStatus = "✓ Copied!"
+					m.copyStatusTimer = 20
+				} else {
+					m.copyStatus = "✗ Copy failed"
+					m.copyStatusTimer = 20
+				}
 			}
 			return m, nil
 
-		case tea.KeyPgDown:
-			m.scrollOffset += m.chatHeight / 2
-			maxScroll := m.getTotalLines() - m.chatHeight
-			if maxScroll < 0 {
-				maxScroll = 0
-			}
-			if m.scrollOffset > maxScroll {
-				m.scrollOffset = maxScroll
+		case tea.KeyEsc:
+			if m.execModal != nil {
+				m.execModal = nil
+				m.lastCommand = ""
 			}
 			return m, nil
 
-		case tea.KeyCtrlJ:
-			// Insert new line (Ctrl+J) - unlimited lines
-			// Insert new line at cursor position
-			currentLine := m.inputLines[m.cursorLine]
-			m.inputLines = append(m.inputLines[:m.cursorLine+1], m.inputLines[m.cursorLine:]...)
-			m.inputLines[m.cursorLine+1] = currentLine[m.cursorPos:]
-			m.inputLines[m.cursorLine] = currentLine[:m.cursorPos]
-			m.cursorLine++
-			m.cursorPos = 0
+		case tea.KeyTab:
+			if m.execModal != nil {
+				// Toggle auto-execute for session
+				m.autoExecute = !m.autoExecute
+			}
 			return m, nil
 
 		case tea.KeyEnter:
+			if m.execModal != nil {
+				// Execute command based on cursor position
+				// Cursor 0 = Execute, 1 = Auto-execute, 2 = Cancel
+				if m.execModal.Cursor() == 0 {
+					// Execute once
+					if m.lastCommand != "" && m.status == StatusReady {
+						m.isLoading = true
+						m.execModal = nil
+						m.execStatus = "Executing..."
+						return m, ExecuteCommand(m.lastCommand)
+					}
+				} else if m.execModal.Cursor() == 1 {
+					// Auto-execute for session
+					m.autoExecute = true
+					if m.lastCommand != "" && m.status == StatusReady {
+						m.isLoading = true
+						m.execModal = nil
+						m.execStatus = "Executing..."
+						return m, ExecuteCommand(m.lastCommand)
+					}
+				} else {
+					// Cancel
+					m.execModal = nil
+					m.lastCommand = ""
+				}
+			}
 			if m.status == StatusReady && !m.isLoading {
 				// Join all lines
 				userMsg := strings.Join(m.inputLines, "\n")
@@ -163,6 +216,28 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.isLoading = true
 					m.currentResponse = ""
 					return m, StartChat(userMsg)
+				}
+			}
+			return m, nil
+
+		case tea.KeyUp:
+			if m.execModal != nil {
+				m.execModal.CursorUp()
+			} else if m.cursorLine > 0 {
+				m.cursorLine--
+				if m.cursorPos > len(m.inputLines[m.cursorLine]) {
+					m.cursorPos = len(m.inputLines[m.cursorLine])
+				}
+			}
+			return m, nil
+
+		case tea.KeyDown:
+			if m.execModal != nil {
+				m.execModal.CursorDown()
+			} else if m.cursorLine < len(m.inputLines)-1 {
+				m.cursorLine++
+				if m.cursorPos > len(m.inputLines[m.cursorLine]) {
+					m.cursorPos = len(m.inputLines[m.cursorLine])
 				}
 			}
 			return m, nil
@@ -182,24 +257,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if m.cursorLine < len(m.inputLines)-1 {
 				m.cursorLine++
 				m.cursorPos = 0
-			}
-			return m, nil
-
-		case tea.KeyUp:
-			if m.cursorLine > 0 {
-				m.cursorLine--
-				if m.cursorPos > len(m.inputLines[m.cursorLine]) {
-					m.cursorPos = len(m.inputLines[m.cursorLine])
-				}
-			}
-			return m, nil
-
-		case tea.KeyDown:
-			if m.cursorLine < len(m.inputLines)-1 {
-				m.cursorLine++
-				if m.cursorPos > len(m.inputLines[m.cursorLine]) {
-					m.cursorPos = len(m.inputLines[m.cursorLine])
-				}
 			}
 			return m, nil
 
@@ -224,6 +281,34 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.inputLines[m.cursorLine] += m.inputLines[m.cursorLine+1]
 				m.inputLines = append(m.inputLines[:m.cursorLine+1], m.inputLines[m.cursorLine+2:]...)
 			}
+			return m, nil
+
+		case tea.KeyPgUp:
+			m.scrollOffset -= m.chatHeight / 2
+			if m.scrollOffset < 0 {
+				m.scrollOffset = 0
+			}
+			return m, nil
+
+		case tea.KeyPgDown:
+			m.scrollOffset += m.chatHeight / 2
+			maxScroll := m.getTotalLines() - m.chatHeight
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
+			if m.scrollOffset > maxScroll {
+				m.scrollOffset = maxScroll
+			}
+			return m, nil
+
+		case tea.KeyCtrlJ:
+			// Insert new line (Ctrl+J) - unlimited lines
+			currentLine := m.inputLines[m.cursorLine]
+			m.inputLines = append(m.inputLines[:m.cursorLine+1], m.inputLines[m.cursorLine:]...)
+			m.inputLines[m.cursorLine+1] = currentLine[m.cursorPos:]
+			m.inputLines[m.cursorLine] = currentLine[:m.cursorPos]
+			m.cursorLine++
+			m.cursorPos = 0
 			return m, nil
 
 		default:
@@ -253,6 +338,35 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentResponse = ""
 			m.reasoningText = ""
 			m.status = StatusReady
+			
+			// Check for COMMAND: in the last assistant message
+			if m.execModal == nil && len(m.messages) > 0 {
+				lastMsg := m.messages[len(m.messages)-1]
+				if lastMsg.Type == AssistantMessage {
+					if idx := strings.Index(lastMsg.Content, "COMMAND:"); idx >= 0 {
+						// Extract command
+						cmd := strings.TrimSpace(lastMsg.Content[idx+len("COMMAND:"):])
+						if newlineIdx := strings.Index(cmd, "\n"); newlineIdx > 0 {
+							cmd = cmd[:newlineIdx]
+						}
+						cmd = strings.TrimSpace(cmd)
+						if cmd != "" {
+							m.lastCommand = cmd
+							if m.autoExecute {
+								// Auto-execute for this session
+								m.isLoading = true
+								m.execStatus = "Executing..."
+								return m, ExecuteCommand(cmd)
+							} else {
+								// Show modal to ask for permission
+								modalModel := modal.New(cmd)
+								m.execModal = &modalModel
+							}
+						}
+					}
+				}
+			}
+			
 			// Close channel on complete
 			if modelChan != nil {
 				close(modelChan)
@@ -322,6 +436,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.client = SetClientFunc()
 			}
 		}
+		return m, nil
+
+	case ExecResultMsg:
+		m.isLoading = false
+		if msg.Err != nil {
+			m.execStatus = "✗ Command failed"
+			m.messages = append(m.messages, NewMessage(ErrorMessage, "Command failed: "+msg.Err.Error()))
+		} else {
+			m.execStatus = "✓ Command executed"
+			m.messages = append(m.messages, NewMessage(SystemMessage, "Command output:\n```\n"+msg.Output+"```"))
+		}
+		m.execStatusTimer = 30
+		m.lastCommand = ""
 		return m, nil
 	}
 
@@ -411,7 +538,13 @@ func (m Model) View() string {
 
 	// Help text at bottom
 	b.WriteString("\n")
-	b.WriteString(HelpStyle.Render("Ctrl+C: Quit | Enter: Send | Ctrl+J: New line | Mouse/PgUp/PgDn: Scroll | ↑↓←→: Navigate input"))
+	helpText := "Ctrl+C: Quit | Enter: Send | Tab: Toggle auto | Esc: Cancel | Ctrl+K: Copy"
+	if m.execStatus != "" {
+		helpText = m.execStatus + "  " + helpText
+	} else if m.copyStatus != "" {
+		helpText = m.copyStatus + "  " + helpText
+	}
+	b.WriteString(HelpStyle.Render(helpText))
 
 	// Quit message
 	if m.quitting {
@@ -419,7 +552,41 @@ func (m Model) View() string {
 		b.WriteString(SubtitleStyle.Render("Goodbye! 👋"))
 	}
 
-	return b.String()
+	result := b.String()
+
+	// Show execution permission modal
+	if m.execModal != nil {
+		modalView := m.execModal.View()
+		// Center modal vertically and horizontally
+		modalWidth := lipgloss.Width(modalView)
+		modalHeight := strings.Count(modalView, "\n") + 1
+		x := (m.width - modalWidth) / 2
+		if x < 0 {
+			x = 0
+		}
+		y := (m.height - modalHeight) / 2
+		if y < 0 {
+			y = 0
+		}
+		
+		// Create modal string with proper positioning
+		modalLines := strings.Split(modalView, "\n")
+		var spacedModal strings.Builder
+		for i := 0; i < y; i++ {
+			spacedModal.WriteString("\n")
+		}
+		for _, line := range modalLines {
+			for i := 0; i < x; i++ {
+				spacedModal.WriteString(" ")
+			}
+			spacedModal.WriteString(line)
+			spacedModal.WriteString("\n")
+		}
+		
+		result += spacedModal.String()
+	}
+
+	return result
 }
 
 // renderStatus renders the status indicator
@@ -470,7 +637,7 @@ func (m Model) renderChat() string {
 
 	// Calculate visible range based on actual line count
 	visibleLines := m.chatHeight
-	
+
 	// Ensure scrollOffset is within bounds
 	if m.scrollOffset < 0 {
 		m.scrollOffset = 0
@@ -482,7 +649,7 @@ func (m Model) renderChat() string {
 	if m.scrollOffset > maxScroll {
 		m.scrollOffset = maxScroll
 	}
-	
+
 	// Build visible portion
 	var visibleMessages []string
 	var currentLine int
@@ -496,7 +663,42 @@ func (m Model) renderChat() string {
 		}
 	}
 
+	// Add scrollbar on the right if needed
+	if totalLines > visibleLines {
+		return m.renderWithScrollbar(visibleMessages, totalLines, visibleLines)
+	}
+
 	return strings.Join(visibleMessages, "\n")
+}
+
+// renderWithScrollbar renders chat with a scrollbar on the right
+func (m Model) renderWithScrollbar(lines []string, totalLines, visibleLines int) string {
+	// Calculate thumb position and size
+	thumbSize := visibleLines * visibleLines / totalLines
+	if thumbSize < 1 {
+		thumbSize = 1
+	}
+	
+	thumbPos := 0
+	if totalLines > visibleLines {
+		thumbPos = m.scrollOffset * visibleLines / totalLines
+	}
+	
+	var result strings.Builder
+	for i, line := range lines {
+		result.WriteString(line)
+		// Add scrollbar character
+		if i >= thumbPos && i < thumbPos+thumbSize {
+			result.WriteString(lipgloss.NewStyle().Foreground(ScrollbarColor).Render("│"))
+		} else {
+			result.WriteString(" ")
+		}
+		if i < len(lines)-1 {
+			result.WriteString("\n")
+		}
+	}
+	
+	return result.String()
 }
 
 // renderMessage renders a single message
@@ -530,6 +732,12 @@ type StreamMsg struct {
 // InitClientMsg represents client initialization result
 type InitClientMsg struct {
 	Err error
+}
+
+// ExecResultMsg represents command execution result
+type ExecResultMsg struct {
+	Output string
+	Err    error
 }
 
 // modelRef holds a reference to send messages back
@@ -659,6 +867,22 @@ func getAIClient() *Client {
 		return SetClientFunc()
 	}
 	return nil
+}
+
+// ExecuteCommand executes a shell command
+func ExecuteCommand(cmd string) tea.Cmd {
+	return func() tea.Msg {
+		client := getAIClient()
+		if client == nil {
+			return ExecResultMsg{Err: fmt.Errorf("AI client not available")}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		output, err := client.ExecuteCommand(ctx, cmd)
+		return ExecResultMsg{Output: output, Err: err}
+	}
 }
 
 // getTotalLines calculates total display lines in chat

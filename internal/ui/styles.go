@@ -8,6 +8,7 @@ var (
 	MutedColor     = lipgloss.Color("#808080")
 	AccentColor   = lipgloss.Color("#00FF00")
 	ErrorColor    = lipgloss.Color("#FF0000")
+	ScrollbarColor = lipgloss.Color("#FFA500")
 
 	// Base styles
 	BaseStyle = lipgloss.NewStyle().

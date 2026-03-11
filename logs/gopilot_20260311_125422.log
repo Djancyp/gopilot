@@ -1,0 +1,3 @@
+[2026-03-11 12:54:22.299] [main.go:25] Logger initialized file=logs/gopilot_20260311_125422.log
+[2026-03-11 12:54:22.314] [main.go:30] GoPilot starting debug=true
+[2026-03-11 12:54:24.224] [main.go:44] Client initialized model=Qwen3-0.6B-Q8_0.gguf

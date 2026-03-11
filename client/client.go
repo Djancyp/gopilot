@@ -2,10 +2,11 @@ package client
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -16,57 +17,24 @@ import (
 	"github.com/ardanlabs/kronk/sdk/tools/defaults"
 	"github.com/ardanlabs/kronk/sdk/tools/libs"
 	"github.com/ardanlabs/kronk/sdk/tools/models"
-	"github.com/gopilot/gopilot/tools"
+	"github.com/gopilot/gopilot/logger"
 )
 
-// Tool describes the features which all tools must implement.
-type Tool interface {
-	Call(ctx context.Context, toolCall model.ResponseToolCall) model.D
+// SystemContext holds system information for command generation
+type SystemContext struct {
+	PWD        string
+	OS         string
+	Arch       string
+	Shell      string
+	DirListing string
 }
 
-// listDirectoryTool implements the list_directory tool
-type listDirectoryTool struct{}
-
-func (t listDirectoryTool) Call(ctx context.Context, toolCall model.ResponseToolCall) model.D {
-	var args struct {
-		Path string `json:"path"`
-	}
-	argsJSON, _ := json.Marshal(toolCall.Function.Arguments)
-	json.Unmarshal(argsJSON, &args)
-
-	result, err := tools.ListDir(args.Path)
-	status := "SUCCEEDED"
-	if err != nil {
-		status = "FAILED"
-		result = err.Error()
-	}
-
-	return model.D{
-		"tool_call_id": toolCall.ID,
-		"role":         "tool",
-		"status":       status,
-		"data":         result,
-	}
-}
-
-func RegisterListDirectory(toolsMap map[string]Tool) model.D {
-	toolsMap["list_directory"] = listDirectoryTool{}
-	return model.D{
-		"type": "function",
-		"function": model.D{
-			"name":        "list_directory",
-			"description": "List directory contents with details (like ls -la)",
-			"parameters": model.D{
-				"type": "object",
-				"properties": model.D{
-					"path": model.D{
-						"type":        "string",
-						"description": "Directory path to list, defaults to current directory if not provided",
-					},
-				},
-			},
-		},
-	}
+// Client wraps the Kronk AI client
+type Client struct {
+	krn       *kronk.Kronk
+	messages  []model.D
+	modelName string
+	sysCtx    SystemContext
 }
 
 // suppressStderr temporarily redirects stderr to /dev/null
@@ -93,15 +61,6 @@ func suppressStderr() func() {
 	}
 }
 
-// Client wraps the Kronk AI client
-type Client struct {
-	krn       *kronk.Kronk
-	messages  []model.D
-	modelName string
-	tools     map[string]Tool
-	toolDocs  []model.D
-}
-
 // Config holds the client configuration
 type Config struct {
 	ModelSourceURL string
@@ -115,11 +74,43 @@ func DefaultConfig() Config {
 		ModelSourceURL: "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf",
 		SystemPrompt: `You are GoPilot, a helpful AI assistant integrated into a terminal chat application.
 You help users with coding questions, explain concepts, and provide clear, concise answers.
-Always be helpful and accurate in your responses.
 
-You have access to the following tools:
-- list_directory: List directory contents with details (like ls -la)
-  Parameters: path (string, optional) - directory path, defaults to current directory`,
+For technical tasks (file operations, system commands, git, searches, etc.), provide a plan with shell commands to execute.
+
+Format your response like this:
+PLAN: <brief explanation of what you'll do>
+COMMAND: <the exact shell command to run>
+
+Examples:
+User: "list all go files"
+PLAN: Find all Go source files in the current directory
+COMMAND: find . -name "*.go" -type f
+
+User: "show git status"
+PLAN: Check the current git repository status
+COMMAND: git status
+
+User: "search for function main"
+PLAN: Search for the main function definition in Go files
+COMMAND: grep -rn "func main" --include="*.go"
+
+User: "create a backup of README.md"
+PLAN: Create a backup copy of the README file
+COMMAND: cp README.md README.md.bak
+
+User: "show disk usage"
+PLAN: Display disk space usage
+COMMAND: df -h
+
+User: "compress all log files"
+PLAN: Archive all .log files into a compressed tarball
+COMMAND: tar -czvf logs.tar.gz *.log
+
+User: "show me the last 20 lines of the log"
+PLAN: Display the last 20 lines of the log file
+COMMAND: tail -n 20 app.log
+
+Always provide clear plans and accurate commands. The user will see the command and can choose to execute it.`,
 	}
 }
 
@@ -222,24 +213,59 @@ func New(cfg Config) (*Client, error) {
 		}
 	}
 
+	// Collect system context
+	sysCtx := collectSystemContext()
+
 	// Initialize messages with system prompt
 	messages := []model.D{
-		model.TextMessage(model.RoleSystem, cfg.SystemPrompt),
-	}
-
-	// Initialize tools
-	toolsMap := make(map[string]Tool)
-	toolDocs := []model.D{
-		RegisterListDirectory(toolsMap),
+		model.TextMessage(model.RoleSystem, cfg.SystemPrompt+"\n\nSystem Context:\n- OS: "+sysCtx.OS+"\n- Arch: "+sysCtx.Arch+"\n- PWD: "+sysCtx.PWD+"\n- Shell: "+sysCtx.Shell),
 	}
 
 	return &Client{
 		krn:       krn,
 		messages:  messages,
 		modelName: modelName,
-		tools:     toolsMap,
-		toolDocs:  toolDocs,
+		sysCtx:    sysCtx,
 	}, nil
+}
+
+// collectSystemContext gathers system information
+func collectSystemContext() SystemContext {
+	ctx := SystemContext{
+		OS:   runtime.GOOS,
+		Arch: runtime.GOARCH,
+	}
+
+	// Get current working directory
+	pwd, _ := os.Getwd()
+	ctx.PWD = pwd
+
+	// Determine shell
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		if runtime.GOOS == "windows" {
+			shell = "cmd.exe"
+		} else {
+			shell = "/bin/sh"
+		}
+	}
+	ctx.Shell = shell
+
+	// Get directory listing
+	listing, _ := getDirListing(pwd)
+	ctx.DirListing = listing
+
+	return ctx
+}
+
+// getDirListing gets a brief directory listing
+func getDirListing(path string) (string, error) {
+	cmd := exec.Command("ls", "-la", path)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
 }
 
 // ChatResponse represents a streaming response
@@ -255,12 +281,10 @@ func (c *Client) Chat(ctx context.Context, userMessage string) (<-chan ChatRespo
 	// Add user message to history
 	c.messages = append(c.messages, model.TextMessage(model.RoleUser, userMessage))
 
-	// Prepare request with tools
+	// Prepare request
 	d := model.D{
-		"messages":       c.messages,
-		"tools":          c.toolDocs,
-		"tool_selection": "auto",
-		"max_tokens":     2048,
+		"messages":   c.messages,
+		"max_tokens": 2048,
 	}
 
 	// Start streaming chat
@@ -270,7 +294,7 @@ func (c *Client) Chat(ctx context.Context, userMessage string) (<-chan ChatRespo
 	}
 
 	// Transform kronk response channel to our response channel
-	respCh := make(chan ChatResponse)
+	respCh := make(chan ChatResponse, 100)
 
 	go func() {
 		defer close(respCh)
@@ -298,51 +322,6 @@ func (c *Client) Chat(ctx context.Context, userMessage string) (<-chan ChatRespo
 				}
 				respCh <- ChatResponse{IsComplete: true}
 				return
-
-			case model.FinishReasonTool:
-				// Handle tool calls
-				if delta.ToolCalls != nil && len(delta.ToolCalls) > 0 {
-					// Add tool call request to conversation
-					var toolCallDocs []model.D
-					for _, tc := range delta.ToolCalls {
-						argsJSON, _ := json.Marshal(tc.Function.Arguments)
-						toolCallDocs = append(toolCallDocs, model.D{
-							"id":   tc.ID,
-							"type": "function",
-							"function": model.D{
-								"name":      tc.Function.Name,
-								"arguments": string(argsJSON),
-							},
-						})
-					}
-					c.messages = append(c.messages, model.D{
-						"role":       "assistant",
-						"tool_calls": toolCallDocs,
-					})
-
-					// Execute tools
-					for _, toolCall := range delta.ToolCalls {
-						tool, exists := c.tools[toolCall.Function.Name]
-						if !exists {
-							continue
-						}
-
-						// Call the tool
-						result := tool.Call(ctx, toolCall)
-
-						// Send tool result to UI
-						if status, ok := result["status"].(string); ok && status == "SUCCEEDED" {
-							if data, ok := result["data"].(string); ok {
-								respCh <- ChatResponse{Content: fmt.Sprintf("```\n%s\n```", data)}
-							}
-						} else {
-							respCh <- ChatResponse{Content: "Tool call failed"}
-						}
-
-						// Add tool response to history
-						c.messages = append(c.messages, result)
-					}
-				}
 
 			default:
 				if delta.Reasoning != "" {
@@ -395,4 +374,36 @@ func (c *Client) Reset(systemPrompt string) {
 // GetHistoryLength returns the number of messages in history
 func (c *Client) GetHistoryLength() int {
 	return len(c.messages)
+}
+
+// ExecuteCommand executes a shell command and returns the output
+func (c *Client) ExecuteCommand(ctx context.Context, cmd string) (string, error) {
+	logger.Info("Executing command", "command", cmd, "shell", c.sysCtx.Shell, "pwd", c.sysCtx.PWD)
+
+	shell := c.sysCtx.Shell
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	
+	execCmd := exec.CommandContext(ctx, shell, "-c", cmd)
+	execCmd.Dir = c.sysCtx.PWD  // Set working directory
+	output, err := execCmd.CombinedOutput()
+
+	if err != nil {
+		logger.Error("Command failed", "command", cmd, "error", err, "output", string(output))
+		return "", fmt.Errorf("command failed: %w\nOutput: %s", err, string(output))
+	}
+
+	logger.Info("Command succeeded", "command", cmd, "output_length", len(output), "output", string(output))
+	return string(output), nil
+}
+
+// GetSystemContext returns the current system context
+func (c *Client) GetSystemContext() SystemContext {
+	return c.sysCtx
+}
+
+// RefreshSystemContext updates the system context
+func (c *Client) RefreshSystemContext() {
+	c.sysCtx = collectSystemContext()
 }
