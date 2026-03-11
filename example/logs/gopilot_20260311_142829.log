@@ -1,0 +1,11 @@
+[2026-03-11 14:28:29.955] [main.go:25] Logger initialized file=logs/gopilot_20260311_142829.log
+[2026-03-11 14:28:29.965] [main.go:30] GoPilot starting debug=true
+[2026-03-11 14:28:31.950] [main.go:44] Client initialized model=Qwen3-0.6B-Q8_0.gguf
+[2026-03-11 14:29:07.214] [client.go:379] Executing command command=prompt user to share the problematic code or describe the issue so I can assist with fixing it. shell=/usr/bin/fish pwd=/home/djan/Documents/gopilot/example
+[2026-03-11 14:29:07.273] [client.go:391] Command failed command=prompt user to share the problematic code or describe the issue so I can assist with fixing it. error=exit status 127 output=[41mfish: Unknown command: prompt
+fish: 
+prompt user to share the problematic code or describe the issue so I can assist with fixing it.
+^~~~~^
+
+[2026-03-11 14:31:47.403] [main.go:72] GoPilot exited
+[2026-03-11 14:31:47.414] [main.go:73] Logger closed

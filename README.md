@@ -2,7 +2,7 @@
 
 A Qwen-like CLI assistant tool built in Go with a beautiful terminal UI and local AI inference.
 
-![GoPilot](assets/gopilot.jpg)
+![GoPilot](assets/hero.png)
 
 ## Features
 

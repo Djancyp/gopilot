@@ -135,3 +135,7 @@ var modelSpecConfig = modelSpec{
 
 MIT
 
+[2026-03-11 14:02:24.336] [client.go:381] Executing command command=ls -R shell=/usr/bin/fish pwd=/home/djan/Documents/gopilot
+[2026-03-11 14:02:24.398] [client.go:397] Command succeeded command=ls -R output_length=5 output=[41m
+[2026-03-11 14:06:25.848] [main.go:72] GoPilot exited
+[2026-03-11 14:06:25.849] [main.go:73] Logger closed

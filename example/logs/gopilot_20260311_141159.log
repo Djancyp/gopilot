@@ -1,0 +1,17 @@
+[2026-03-11 14:11:59.529] [main.go:25] Logger initialized file=logs/gopilot_20260311_141159.log
+[2026-03-11 14:11:59.538] [main.go:30] GoPilot starting debug=true
+[2026-03-11 14:12:01.670] [main.go:44] Client initialized model=Qwen3-0.6B-Q8_0.gguf
+[2026-03-11 14:12:56.072] [client.go:381] Executing command command=1. Check HTML syntax: shell=/usr/bin/fish pwd=/home/djan/Documents/gopilot/example
+[2026-03-11 14:12:56.132] [client.go:393] Command failed command=1. Check HTML syntax: error=exit status 127 output=[41mfish: Unknown command: 1.
+fish: 
+1. Check HTML syntax:
+^^
+
+[2026-03-11 14:13:44.301] [client.go:381] Executing command command=1. Check file existence: shell=/usr/bin/fish pwd=/home/djan/Documents/gopilot/example
+[2026-03-11 14:13:44.353] [client.go:393] Command failed command=1. Check file existence: error=exit status 127 output=[41mfish: Unknown command: 1.
+fish: 
+1. Check file existence:
+^^
+
+[2026-03-11 14:14:08.313] [main.go:72] GoPilot exited
+[2026-03-11 14:14:08.323] [main.go:73] Logger closed

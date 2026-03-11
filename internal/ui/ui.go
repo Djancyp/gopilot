@@ -41,6 +41,7 @@ type Model struct {
 	copyStatus      string
 	copyStatusTimer int
 	lastCommand     string
+	allCommands     []string
 	execStatus      string
 	execStatusTimer int
 	execModal       *modal.Model
@@ -178,28 +179,29 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyEnter:
 			if m.execModal != nil {
 				// Execute command based on cursor position
-				// Cursor 0 = Execute, 1 = Auto-execute, 2 = Cancel
+				// Cursor 0 = Execute all, 1 = Auto-execute (session), 2 = Cancel
 				if m.execModal.Cursor() == 0 {
-					// Execute once
-					if m.lastCommand != "" && m.status == StatusReady {
+					// Execute all commands
+					if len(m.allCommands) > 0 && m.status == StatusReady {
 						m.isLoading = true
 						m.execModal = nil
-						m.execStatus = "Executing..."
-						return m, ExecuteCommand(m.lastCommand)
+						m.execStatus = "Executing commands..."
+						return m, ExecuteCommands(m.allCommands)
 					}
 				} else if m.execModal.Cursor() == 1 {
 					// Auto-execute for session
 					m.autoExecute = true
-					if m.lastCommand != "" && m.status == StatusReady {
+					if len(m.allCommands) > 0 && m.status == StatusReady {
 						m.isLoading = true
 						m.execModal = nil
-						m.execStatus = "Executing..."
-						return m, ExecuteCommand(m.lastCommand)
+						m.execStatus = "Executing commands..."
+						return m, ExecuteCommands(m.allCommands)
 					}
 				} else {
 					// Cancel
 					m.execModal = nil
 					m.lastCommand = ""
+					m.allCommands = nil
 				}
 			}
 			if m.status == StatusReady && !m.isLoading {
@@ -339,30 +341,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.reasoningText = ""
 			m.status = StatusReady
 			
-			// Check for COMMAND: in the last assistant message
+			// Check for COMMAND: in the last assistant message and execute all
 			if m.execModal == nil && len(m.messages) > 0 {
 				lastMsg := m.messages[len(m.messages)-1]
 				if lastMsg.Type == AssistantMessage {
-					if idx := strings.Index(lastMsg.Content, "COMMAND:"); idx >= 0 {
-						// Extract command
-						cmd := strings.TrimSpace(lastMsg.Content[idx+len("COMMAND:"):])
-						if newlineIdx := strings.Index(cmd, "\n"); newlineIdx > 0 {
-							cmd = cmd[:newlineIdx]
-						}
-						cmd = strings.TrimSpace(cmd)
-						if cmd != "" {
-							m.lastCommand = cmd
+					// Extract ALL commands from the response
+					commands := extractCommands(lastMsg.Content)
+					if len(commands) > 0 {
+						// Validate commands - skip if they look like natural language
+						validCommands := filterValidCommands(commands)
+						if len(validCommands) > 0 {
 							if m.autoExecute {
-								// Auto-execute for this session
+								// Auto-execute all commands for this session
 								m.isLoading = true
-								m.execStatus = "Executing..."
-								return m, ExecuteCommand(cmd)
+								m.execStatus = "Executing commands..."
+								return m, ExecuteCommands(validCommands)
 							} else {
-								// Show modal to ask for permission
-								modalModel := modal.New(cmd)
+								// Show modal with first command (user can enable auto-execute)
+								m.lastCommand = validCommands[0]
+								m.allCommands = validCommands
+								modalModel := modal.New(validCommands[0])
 								m.execModal = &modalModel
 							}
 						}
+						// If no valid commands, just show the AI response (it's probably explanatory)
 					}
 				}
 			}
@@ -552,41 +554,58 @@ func (m Model) View() string {
 		b.WriteString(SubtitleStyle.Render("Goodbye! 👋"))
 	}
 
-	result := b.String()
-
-	// Show execution permission modal
+	// Show execution permission modal as overlay on top of chat
 	if m.execModal != nil {
 		modalView := m.execModal.View()
-		// Center modal vertically and horizontally
+		
+		// Calculate modal dimensions
 		modalWidth := lipgloss.Width(modalView)
 		modalHeight := strings.Count(modalView, "\n") + 1
+		
+		// Center horizontally
 		x := (m.width - modalWidth) / 2
 		if x < 0 {
 			x = 0
 		}
+		
+		// Center vertically
 		y := (m.height - modalHeight) / 2
 		if y < 0 {
 			y = 0
 		}
 		
-		// Create modal string with proper positioning
-		modalLines := strings.Split(modalView, "\n")
-		var spacedModal strings.Builder
-		for i := 0; i < y; i++ {
-			spacedModal.WriteString("\n")
-		}
-		for _, line := range modalLines {
-			for i := 0; i < x; i++ {
-				spacedModal.WriteString(" ")
-			}
-			spacedModal.WriteString(line)
-			spacedModal.WriteString("\n")
+		// Build overlay by splitting chat into lines and inserting modal
+		lines := strings.Split(b.String(), "\n")
+		
+		// Ensure we have enough lines
+		for len(lines) < m.height {
+			lines = append(lines, "")
 		}
 		
-		result += spacedModal.String()
+		// Overlay modal lines
+		modalLines := strings.Split(modalView, "\n")
+		for i, modalLine := range modalLines {
+			lineIdx := y + i
+			if lineIdx >= 0 && lineIdx < len(lines) {
+				// Pad the existing line if needed
+				existingLine := lines[lineIdx]
+				for len(existingLine) < x {
+					existingLine += " "
+				}
+				// Overlay modal line (truncate if too long)
+				if x+len(modalLine) > len(existingLine) {
+					existingLine = existingLine[:x] + modalLine
+				} else {
+					existingLine = existingLine[:x] + modalLine + existingLine[x+len(modalLine):]
+				}
+				lines[lineIdx] = existingLine
+			}
+		}
+		
+		return strings.Join(lines, "\n")
 	}
 
-	return result
+	return b.String()
 }
 
 // renderStatus renders the status indicator
@@ -883,6 +902,122 @@ func ExecuteCommand(cmd string) tea.Cmd {
 		output, err := client.ExecuteCommand(ctx, cmd)
 		return ExecResultMsg{Output: output, Err: err}
 	}
+}
+
+// ExecuteCommands executes multiple shell commands sequentially
+func ExecuteCommands(commands []string) tea.Cmd {
+	return func() tea.Msg {
+		client := getAIClient()
+		if client == nil {
+			return ExecResultMsg{Err: fmt.Errorf("AI client not available")}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+
+		var allOutput strings.Builder
+		var allErrors strings.Builder
+
+		for i, cmd := range commands {
+			output, err := client.ExecuteCommand(ctx, cmd)
+			if err != nil {
+				allErrors.WriteString(fmt.Sprintf("Command %d failed: %v\n", i+1, err))
+			} else {
+				if output != "" {
+					allOutput.WriteString(output)
+				}
+			}
+		}
+
+		result := allOutput.String()
+		if errStr := allErrors.String(); errStr != "" {
+			return ExecResultMsg{Output: result, Err: fmt.Errorf("%s", errStr)}
+		}
+		return ExecResultMsg{Output: result, Err: nil}
+	}
+}
+
+// extractCommands extracts all COMMAND: lines from text
+func extractCommands(text string) []string {
+	var commands []string
+	lines := strings.Split(text, "\n")
+	
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "COMMAND:") {
+			cmd := strings.TrimSpace(strings.TrimPrefix(line, "COMMAND:"))
+			if cmd != "" {
+				commands = append(commands, cmd)
+			}
+		}
+	}
+	
+	return commands
+}
+
+// filterValidCommands filters out commands that look like natural language
+func filterValidCommands(commands []string) []string {
+	var valid []string
+	
+	for _, cmd := range commands {
+		// Skip if it looks like natural language (no shell command structure)
+		if isNaturalLanguage(cmd) {
+			continue
+		}
+		valid = append(valid, cmd)
+	}
+	
+	return valid
+}
+
+// isNaturalLanguage checks if text looks like natural language instead of a shell command
+func isNaturalLanguage(text string) bool {
+	// Common shell command starters
+	cmdStarters := []string{
+		"ls", "cd", "cat", "echo", "grep", "find", "sed", "awk", "cp", "mv", "rm",
+		"mkdir", "touch", "chmod", "chown", "git", "npm", "go", "python", "node",
+		"curl", "wget", "tar", "zip", "unzip", "head", "tail", "wc", "sort", "uniq",
+		"ps", "kill", "top", "htop", "df", "du", "free", "who", "pwd", "env",
+		"export", "source", "bash", "sh", "zsh", "fish", "apt", "yum", "brew",
+		"docker", "kubectl", "terraform", "ansible", "make", "gcc", "g++",
+	}
+	
+	textLower := strings.ToLower(text)
+	
+	// Check if it starts with a known command
+	for _, starter := range cmdStarters {
+		if strings.HasPrefix(textLower, starter+" ") || strings.HasPrefix(textLower, starter) {
+			return false
+		}
+	}
+	
+	// Check for shell operators (indicates it's a command)
+	shellOps := []string{">", "<", "|", "&&", "||", ";", "$", "`", ">>"}
+	for _, op := range shellOps {
+		if strings.Contains(text, op) {
+			return false
+		}
+	}
+	
+	// Check for common natural language patterns
+	nlPatterns := []string{
+		"please", "verify", "check if", "ensure", "make sure", "confirm",
+		"you should", "you can", "try to", "need to", "want to",
+		"ask user", "prompt user", "request", "describe", "explain",
+	}
+	
+	for _, pattern := range nlPatterns {
+		if strings.Contains(textLower, pattern) {
+			return true
+		}
+	}
+	
+	// If it's a long sentence without shell syntax, likely natural language
+	words := strings.Fields(text)
+	if len(words) > 8 && !strings.Contains(text, " ") {
+		return true
+	}
+	
+	return false
 }
 
 // getTotalLines calculates total display lines in chat
